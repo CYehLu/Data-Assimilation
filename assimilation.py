@@ -751,4 +751,52 @@ class Hybrid3DEnVar(DAbase):
         self.background_ens = background_ens
         
         
+class DiagWarning(UserWarning):
+    pass
+
+class EnSRF(EnKF):  
+    def _check_params(self):
+        # check if R is diagonal matrix
+        R = self._params['R']
+        Rnew = np.zeros_like(R)
+        np.fill_diagonal(Rnew, R.diagonal())
+        if not np.all(R == Rnew):
+            messg = 'EnSRF assimilates observations serially. It suggests that R should be diagonal matrix.'
+            warnings.warn(messg, DiagWarning)
+        
+    def _analysis(self, xb, yo, R, H_func=None, loc_mo=None, loc_oo=None):
+        """xb.shape = (n_dim, n_ens)"""
+        if H_func is None:
+            H_func = lambda arr: arr
+        
+        N_ens = xb.shape[1]
+        xb_mean = xb.mean(axis=1)[:,np.newaxis]   # (ndim_xb, 1)
+        xb_pertb = xb - xb_mean   # (ndim_xb, N_ens)
+        
+        # update `xb_mean`
+        Hxb_mean = H_func(xb).mean(axis=1)[:,np.newaxis]   # (ndim_yo, 1)
+        Hxb_pertb = H_func(xb) - Hxb_mean   # (ndim_yo, N_ens)
+        PfH_T = xb_pertb @ Hxb_pertb.T / (N_ens-1)
+        HPfH_T = Hxb_pertb @ Hxb_pertb.T / (N_ens-1)
+        K = loc_mo * PfH_T @ np.linalg.inv(loc_oo * HPfH_T + R)
+        xa_mean = xb_mean + K @ (yo - H_func(xb_mean))
+        
+        # update `xb_pertb`
+        xa_pertb = xb_pertb.copy()
+        for j_ens in range(N_ens):
+            # assimilate one observation at a time
+            for io, y in enumerate(yo):
+                iR = R[io,io]
+                iHxb_pertb = Hxb_pertb[[io],:]   # (1, N_ens)
+                
+                PfH_T = xb_pertb @ iHxb_pertb.T / (N_ens-1)
+                HPfH_T = iHxb_pertb @ iHxb_pertb.T / (N_ens-1)
+                gamma = 1 / (1 + np.sqrt(iR / (HPfH_T+iR)))
+                K = loc_mo[:,[io]] * PfH_T / (loc_oo[io,io] * HPfH_T + iR)
+                
+                xa_pertb_j = xa_pertb[:,[j_ens]]
+                xa_pertb[:,[j_ens]] = xa_pertb_j - gamma * K * iHxb_pertb[0,j_ens]
+                
+        xa_ens = xa_mean + xa_pertb
+        return xa_ens
         
