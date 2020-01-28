@@ -319,7 +319,9 @@ class EnKF(DAbase):
             'R', 
             'H_func', 
             'alpha', 
-            'inflat'
+            'inflat',
+            'local_mo',
+            'local_oo'
         ]
         
     def list_params(self):
@@ -332,29 +334,38 @@ class EnKF(DAbase):
         if self._params.get('H_func') is None:
             H_func = lambda arr: arr
             self._params['H_func'] = H_func
+        if self._params.get('local_mo') is None:
+            ndim_model = self._params.get('X_ens_ini').shape[0]
+            ndim_obs = self._params.get('obs').shape[0]
+            loc_mo = np.ones((ndim_model, ndim_obs))
+            self._params['local_mo'] = loc_mo
+        if self._params.get('local_oo') is None:
+            ndim_obs = self._params.get('obs').shape[0]
+            loc_oo = np.ones((ndim_obs, ndim_obs))
+            self._params['local_oo'] = loc_oo
             
         missing_params = super()._check_params(self._param_list)
         if missing_params:
             raise ValueError(f"Missing parameters: {missing_params}")
-            
-    def _analysis(self, xb, yo, R, H_func=None):
+    
+    def _analysis(self, xb, yo, R, H_func=None, loc_mo=None, loc_oo=None):
         """xb.shape = (n_dim, n_ens)"""
         if H_func is None:
             H_func = lambda arr: arr
         
         N_ens = xb.shape[1]
-        yo_ens = np.random.multivariate_normal(yo.ravel(), R, size=N_ens).T  # (ndim_yo, N_ens)
-        xb_mean = xb.mean(axis=1)[:,np.newaxis]  # (ndim_xb, 1)
+        xb_mean = xb.mean(axis=1)[:,np.newaxis]   # (ndim_xb, 1)
+        Xb_perturb = xb - xb_mean   # (ndim_xb, N_ens)
+        Hxb_mean = H_func(xb).mean(axis=1)[:,np.newaxis]   # (ndim_yo, 1)
+        HXb_perturb = H_func(xb) - Hxb_mean   # (ndim_yo, N_ens)
         
+        PfH_T = Xb_perturb @ HXb_perturb.T / (N_ens-1)
+        HPfH_T = HXb_perturb @ HXb_perturb.T / (N_ens-1)
+        K = loc_mo * PfH_T @ np.linalg.inv(loc_oo * HPfH_T + R)
+        
+        yo_ens = np.random.multivariate_normal(yo.ravel(), R, size=N_ens).T   # (ndim_yo, N_ens)
         xa_ens = np.zeros((xb.shape[0], N_ens))
-        for iens in range(N_ens):
-            xb_mean = xb.mean(axis=1)[:,np.newaxis]
-            Xb_perturb = xb - xb_mean
-            HXb_perturb = H_func(Xb_perturb) - H_func(Xb_perturb).mean(axis=1)[:,np.newaxis]
-            
-            PfH_T = Xb_perturb @ HXb_perturb.T / (N_ens-1)
-            HPfH_T = HXb_perturb @ HXb_perturb.T / (N_ens-1)
-            K = PfH_T @ np.linalg.inv(HPfH_T + R)
+        for iens in range(N_ens):            
             xa_ens[:,[iens]] = xb[:,[iens]] + K @ (yo_ens[:,[iens]] - H_func(xb[:,[iens]]))
             
         return xa_ens
@@ -373,6 +384,8 @@ class EnKF(DAbase):
         H_func = self._params['H_func']
         alpha = self._params['alpha']
         inflat = self._params['inflat']
+        loc_mo = self._params['local_mo']
+        loc_oo = self._params['local_oo']
         
         ndim, N_ens = xb.shape
         background = np.zeros((N_ens, ndim, cycle_len*cycle_num))
@@ -383,7 +396,7 @@ class EnKF(DAbase):
         
         for nc in range(cycle_num):
             # analysis
-            xa = self._analysis(xb, obs[:,[nc]], R, H_func)
+            xa = self._analysis(xb, obs[:,[nc]], R, H_func, loc_mo, loc_oo)
             
             # inflat
             xa_perturb = xa - xa.mean(axis=1)[:,np.newaxis]
