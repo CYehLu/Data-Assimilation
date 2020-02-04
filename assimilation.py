@@ -370,7 +370,7 @@ class EnKF(DAbase):
             
         return xa_ens
     
-    def cycle(self):
+    def cycle(self, **kwargs):
         self._check_params()
         
         model = self.model
@@ -396,7 +396,7 @@ class EnKF(DAbase):
         
         for nc in range(cycle_num):
             # analysis
-            xa = self._analysis(xb, obs[:,[nc]], R, H_func, loc_mo, loc_oo)
+            xa = self._analysis(xb, obs[:,[nc]], R, H_func, loc_mo, loc_oo, **kwargs)
             
             # inflat
             xa_perturb = xa - xa.mean(axis=1)[:,np.newaxis]
