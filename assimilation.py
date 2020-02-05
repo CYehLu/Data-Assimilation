@@ -2,6 +2,7 @@ import sys
 import warnings
 import numpy as np
 from scipy.optimize import minimize
+from scipy.linalg import sqrtm
 
 
 def progressbar(i, tol, prefix='', size=60, file=sys.stdout):
@@ -800,3 +801,87 @@ class EnSRF(EnKF):
         xa_ens = xa_mean + xa_pertb
         return xa_ens
         
+
+class ETKF(EnKF):
+    """
+    Ensemble Transform Kalman Filter
+    
+    It should note that localization is only used for updating ensemble mean 
+    of K method (e.g etkf.cycle(mean_method='K')). There is no localization
+    for w method (e.g etkf.cycle(mean_method='w')).
+    
+    And localization is for ensemble mean only, there is no localization for 
+    updating ensemble perturbation.
+    
+    *Reference
+    Update ensemble mean of w method:
+        Harlim and Hunt: Local Ensemble Transform Kalman Filter: An efficient
+        scheme for assimilating atmospheric data.
+        https://www.atmos.umd.edu/~ekalnay/pubs/harlim_hunt05.pdf
+    Update ensemble perturbation:
+        Tippett, M. K., J. L. Anderson, C. H. Bishop, T. M. Hamill, and J. S. 
+        Whitaker, 2003: Ensemble square root filters.
+        https://journals.ametsoc.org/doi/pdf/10.1175/1520-0493%282003%29131%3C1485%3AESRF%3E2.0.CO%3B2      
+    """
+    
+    def _analysis_mean_w(self, xb_mean, xb_pertb, Hxb_mean, Hxb_pertb, N_ens, yo, R):
+        """
+        Using the w vector in Harlim and Hunt* to update background ensemble
+        mean to analysis mean.
+        *Reference: 
+        https://www.atmos.umd.edu/~ekalnay/pubs/harlim_hunt05.pdf
+        """
+        P_tilt = np.linalg.inv(Hxb_pertb.T @ np.linalg.inv(R) @ Hxb_pertb + (N_ens-1) * np.eye(N_ens))
+        w = P_tilt @ Hxb_pertb.T @ np.linalg.inv(R) @ (yo - Hxb_mean)
+        xa_mean = xb_mean + xb_pertb @ w
+        return xa_mean
+    
+    def _analysis_mean_K(self, xb_mean, xb_pertb, Hxb_pertb, N_ens, yo, R, H_func, loc_mo, loc_oo):
+        """
+        Using the K matrix (Kalman gain matrix) in traditional Kalman filter to
+        upate background ensemble mean to analysis ensemble mean.
+        """
+        PfH_T = xb_pertb @ Hxb_pertb.T / (N_ens-1)
+        HPfH_T = Hxb_pertb @ Hxb_pertb.T / (N_ens-1)
+        K = loc_mo * PfH_T @ np.linalg.inv(loc_oo * HPfH_T + R)
+        xa_mean = xb_mean + K @ (yo - H_func(xb_mean))
+        return xa_mean
+    
+    def _analysis_perturb(self, xb_pertb, Hxb_pertb, N_ens, R):
+        """
+        Update background ensemble perturbation tp analysis ensemble perturbation.
+        *Reference:
+        https://journals.ametsoc.org/doi/pdf/10.1175/1520-0493%282003%29131%3C1485%3AESRF%3E2.0.CO%3B2
+        """
+        Z = xb_pertb / np.sqrt(N_ens-1)
+        HZ = Hxb_pertb / np.sqrt(N_ens-1)
+        eigval, C = np.linalg.eig(HZ.T @ np.linalg.inv(R) @ HZ)
+        S = np.diag(eigval)
+        T = C @ np.linalg.inv(sqrtm(S+np.eye(N_ens)))
+        T = T.real   # imag part is likely due to numerical error
+        xa_pertb = xb_pertb @ T
+        return xa_pertb
+        
+    def _analysis(self, xb, yo, R, H_func=None, loc_mo=None, loc_oo=None, mean_method='w'):
+        if H_func is None:
+            H_func = lambda arr: arr
+            
+        N_ens = xb.shape[1]
+        xb_mean = xb.mean(axis=1)[:,np.newaxis]   # (ndim_xb, 1)
+        xb_pertb = xb - xb_mean   # (ndim_xb, N_ens)
+        Hxb_mean = H_func(xb).mean(axis=1)[:,np.newaxis]   # (ndim_yo, 1)
+        Hxb_pertb = H_func(xb) - Hxb_mean   # (ndim_yo, N_ens)
+        
+        if mean_method == 'w':
+            xa_mean = self._analysis_mean_w(xb_mean, xb_pertb, Hxb_mean, Hxb_pertb, N_ens, yo, R)
+        elif mean_method == 'K':
+            xa_mean = self._analysis_mean_K(xb_mean, xb_pertb, Hxb_pertb, N_ens, yo, R, H_func, loc_mo, loc_oo)
+        else:
+            raise TypeError('`mean_method` should be "w" or "K"')
+            
+        xa_pertb = self._analysis_perturb(xb_pertb, Hxb_pertb, N_ens, R)
+        xa = xa_mean + xa_pertb
+        return xa
+    
+    def cycle(self, mean_method='w'):
+        super().cycle(mean_method=mean_method)
