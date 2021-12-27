@@ -245,7 +245,7 @@ class M3DVar(DAbase):
             
     def _3dvar_costfunction(self, x, xb, yo, invPb, invR, H_func=None, H=None):
         """
-        x and xb is 1d array with shape (n,), the other is 2d matrix
+        x and xb is 1d array with shape (n,), the others are 2d matrix
         """
         x = x[:,np.newaxis]
         xb = xb[:,np.newaxis]
@@ -255,7 +255,8 @@ class M3DVar(DAbase):
         else:
             innovation = yo - H_func(x) 
 
-        return 0.5 * (xb-x).T @ invPb @ (xb-x) + 0.5 * innovation.T @ invR @ innovation
+        val = 0.5 * (xb-x).T @ invPb @ (xb-x) + 0.5 * innovation.T @ invR @ innovation
+        return val.ravel()
 
     def _analysis(self, xb, yo, Pb, R, H_func=None):    
         if H_func is None:
@@ -700,6 +701,10 @@ class Hybrid3DEnVar(DAbase):
         background_3dvar = np.zeros((ndim, cycle_len*cycle_num))
         analysis_3dvar = np.zeros_like(background_3dvar)
         
+        ndim_obs = X_obs.shape[0]
+        loc_mo = np.ones((ndim, ndim_obs))
+        loc_oo = np.ones((ndim_obs, ndim_obs))
+        
         t_start = 0 
         ts = np.linspace(t_start, (cycle_len-1)*dt, cycle_len)
         
@@ -713,7 +718,7 @@ class Hybrid3DEnVar(DAbase):
             
             xa_3dvar = M3DVar(model, dt)._analysis(xb, obs, Pb, R, H_func)
             xa_3dvar = xa_3dvar[:,np.newaxis]
-            xa_ens = EnKF(model, dt)._analysis(xb_ens, obs, R, H_func)  # (ndim, N_ens)
+            xa_ens = EnKF(model, dt)._analysis(xb_ens, obs, R, H_func, loc_mo, loc_oo)  # (ndim, N_ens)
             
             # inflat
             xa_ens_pertb = xa_ens - xa_ens.mean(axis=1)[:,np.newaxis]
@@ -757,6 +762,8 @@ class DiagWarning(UserWarning):
 
 class EnSRF(EnKF):  
     def _check_params(self):
+        super()._check_params()
+        
         # check if R is diagonal matrix
         R = self._params['R']
         Rnew = np.zeros_like(R)
